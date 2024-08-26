@@ -1,0 +1,79 @@
+use strict;
+use warnings;
+use threads;
+use Thread::Queue;
+
+# Thread-safe queue to hold account data for processing
+my $queue = Thread::Queue->new();
+
+# Subroutine to process account data
+sub process_account {
+    my ($account_data) = @_;
+    my $balance = 0;
+
+    foreach my $line (@$account_data) {
+        my $transaction_type = substr($line, 0, 12);
+        my $amount = substr($line, 23);
+        
+        if ($transaction_type eq 'credit') {
+            $balance += $amount;
+        } elsif ($transaction_type eq 'debit') {
+            $balance -= $amount;
+        }
+    }
+
+    # Print or save the result for this account
+    my $account_number = substr($account_data->[0], 11, 12);
+    print "$account_number,$balance\n";
+}
+
+# Subroutine to handle thread execution with error handling
+sub worker_thread {
+    while (my $account_data = $queue->dequeue()) {
+        eval {
+            process_account($account_data);
+        };
+        if ($@) {
+            # Log the error and continue processing other data
+            warn "Thread encountered an error: $@";
+            # Optionally, you can re-enqueue the failed task for retry
+            # $queue->enqueue($account_data);
+        }
+    }
+}
+
+# Create worker threads
+my @threads;
+for (1 .. 4) {  # Adjust the number of threads based on your CPU cores
+    push @threads, threads->create(\&worker_thread);
+}
+
+# Open the sorted file and start processing
+my $input_file = 'sorted_transactions.txt';
+open(my $fh, '<', $input_file) or die "Could not open file '$input_file' $!";
+
+my @account_data;
+my $prev_account = '';
+
+while (my $line = <$fh>) {
+    chomp $line;
+
+    my $account_number = substr($line, 11, 12);
+
+    if ($prev_account ne '' && $account_number ne $prev_account) {
+        $queue->enqueue([@account_data]);
+        @account_data = ();
+    }
+
+    push @account_data, $line;
+    $prev_account = $account_number;
+}
+
+# Enqueue the last batch
+$queue->enqueue([@account_data]) if @account_data;
+
+# Signal the threads to exit
+$queue->end();
+$_->join() for @threads;
+
+close($fh);
